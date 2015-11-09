@@ -17,9 +17,11 @@
 
 //todo:  command line parsing
 const int num_lps = 1 << 20;
+const int num_events = 2 * num_lps;
 const float stop_time = 60.0f;
 
 const int block_size = 128;
+const int grid_size = ((num_events + block_size - 1) / block_size);
 const int grid_run_size = ((num_lps + block_size - 1) / block_size);
 
 double cpuSecond()
@@ -43,11 +45,11 @@ int main(int argc, char** argv)
 	vex::Random<float> random_state;
 
 	// "Allocate" memory.
-	vex::vector<int> d_event_lp_number (ctx, num_lps);
+	vex::vector<int> d_event_lp_number (ctx, num_events);
 	vex::vector<int> d_event_target_lp_number (ctx, num_lps);
-	d_event_lp_number = vex::element_index(); // 0..num_lps-1
+	d_event_lp_number = (vex::element_index() % num_lps); // 0..num_lps-1
 
-	vex::vector<float> d_event_time (ctx, num_lps);
+	vex::vector<float> d_event_time (ctx, num_events);
 	vex::vector<float> d_remote_flip (ctx, num_lps);
 	d_event_time = random_state (vex::element_index(), random_pass++);
 
@@ -55,6 +57,9 @@ int main(int argc, char** argv)
 	d_events_processed = 0;
 	vex::vector<float> d_lp_current_time (ctx, num_lps);
 	d_lp_current_time = 0.0;
+
+	vex::vector<unsigned char> d_next_event_flag_lp (ctx, num_events);
+	vex::vector<unsigned char> d_next_event_flag_time (ctx, num_events);
 
 	vex::vector<float> d_current_lbts (ctx, 1);
 
@@ -66,74 +71,119 @@ int main(int argc, char** argv)
 	double total_duration;
 
 	// Compile and store the simulator kernel.
+	std::vector<vex::backend::kernel> initKernel;
+	std::vector<vex::backend::kernel> markKernel;
 	std::vector<vex::backend::kernel> simKernel;
-	for(uint d = 0; d < ctx.size(); d++)
+
+	initKernel.emplace_back(ctx.queue(0),
+		VEX_STRINGIZE_SOURCE(
+				kernel void initStops(global float *event_time)
 	{
-	    simKernel.emplace_back(ctx.queue(d),
-	        VEX_STRINGIZE_SOURCE(
-	        		kernel void simulatorRun(global float *current_time,
-	            		global float *event_time,
-	            		global int *event_lp,
-	            		global float *current_lbps,
-	            		global float *remote_flip,
-	            		global float *target_lp,
-	            		global int *events_processed)
-	    {
-	    	const size_t idx = get_local_id(0) + get_group_id(0) * get_local_size(0);
-	    	//printf ("ID: %d, local: %d; group: %d\n", idx, get_local_id (0), get_group_id (0));
-	    	const int num_lps = 1 << 20;
+		const size_t idx = get_local_id(0) + get_group_id(0) * get_local_size(0);
+		const int num_lps = 1 << 20;
 
-	    	const float stop_time = 60.0f;
-	    	const float local_rate = 0.9f;
-	    	const float delay_time = 0.9f;
-	    	const float look_ahead = 4.0f;
+		const float stop_time = 60.0f;
 
-	    	if (idx < num_lps)
-	    	{
-				float safe_time = *current_lbps + look_ahead;
-
-				// Check the next event
-				float next_event_time = event_time[idx];
-
-				// Ok to process?
-				if(next_event_time <= safe_time && next_event_time < stop_time)
-				{
-					float cur_time = current_time[idx];
-					int ev_lp = event_lp[idx];
-
-					//sanity check
-					if(cur_time > next_event_time)// || ev_lp != idx)
-					{
-						printf ("ERROR\n");
-					}
-
-					events_processed[idx]++;
-
-					//next_event_time stores current time if we reach here
-					float new_event_time = delay_time + next_event_time;
-
-					if(remote_flip[idx] < local_rate)
-					{
-						event_lp[idx] = idx;
-					}
-					else
-					{
-						//target_lp could be me, however we'll assume that the probability is small.
-						event_lp[idx] = target_lp[idx];
-						new_event_time += look_ahead;
-					}
-
-					//writes
-
-					current_time[idx] = next_event_time;
-					event_time[idx] = new_event_time;
-				}
-	    	}
-	    }
-	    ),
-	    "simulatorRun"
-	    );
+		if (idx >= num_lps && idx < 2 * num_lps)
+		{
+			event_time[idx] = stop_time;
+		}
 	}
+	),
+	"initStops"
+	);
+
+	markKernel.emplace_back(ctx.queue(0),
+		VEX_STRINGIZE_SOURCE(
+				kernel void markNextEventByLP(global int *event_lp,
+						global unsigned char *next_event_flag_lp,
+						global unsigned char *next_event_flag_time)
+	{
+		const size_t idx = get_local_id(0) + get_group_id(0) * get_local_size(0);
+
+		if (idx == 0 || event_lp[idx] != event_lp[idx-1])
+		{
+			next_event_flag_lp[idx] = 0;
+			next_event_flag_time[idx] = 0;
+		}
+		else
+		{
+			next_event_flag_lp[idx] = 1;
+			next_event_flag_time[idx] = 1;
+		}
+	}
+	),
+	"markNextEventByLP"
+	);
+
+	simKernel.emplace_back(ctx.queue(0),
+		VEX_STRINGIZE_SOURCE(
+				kernel void simulatorRun(global float *current_time,
+					global float *event_time,
+					global int *event_lp,
+					global float *current_lbps,
+					global float *remote_flip,
+					global float *target_lp,
+					global int *events_processed)
+	{
+		const size_t idx = get_local_id(0) + get_group_id(0) * get_local_size(0);
+		const int num_lps = 1 << 20;
+
+		const float stop_time = 60.0f;
+		const float local_rate = 0.9f;
+		const float delay_time = 0.9f;
+		const float look_ahead = 4.0f;
+
+		if (idx < num_lps)
+		{
+			float safe_time = *current_lbps + look_ahead;
+
+			// Check the next event
+			float next_event_time = event_time[idx];
+
+			// Ok to process?
+			if(next_event_time <= safe_time && next_event_time < stop_time)
+			{
+				float cur_time = current_time[idx];
+				int ev_lp = event_lp[idx];
+
+				//sanity check
+				if(cur_time > next_event_time || ev_lp != idx)
+				{
+					printf ("ERROR\n");
+				}
+
+				events_processed[idx]++;
+
+				//next_event_time stores current time if we reach here
+				float new_event_time = delay_time + next_event_time;
+
+				if(remote_flip[idx] < local_rate)
+				{
+					event_lp[idx] = idx;
+				}
+				else
+				{
+					//target_lp could be me, however we'll assume that the probability is small.
+					event_lp[idx] = target_lp[idx];
+					new_event_time += look_ahead;
+				}
+
+				//writes
+
+				current_time[idx] = next_event_time;
+				event_time[idx] = new_event_time;
+			}
+		}
+	}
+	),
+	"simulatorRun"
+	);
+
+	initKernel[0].config (grid_size, block_size);
+	initKernel[0].push_arg(d_event_time(0));
+	initKernel[0](ctx.queue(0));
+	ctx.queue(0).finish();
 
 	// Initialize the Reductors.
 	vex::Reductor<float, vex::MIN> min(ctx);
@@ -159,21 +209,29 @@ int main(int argc, char** argv)
 		vex::sort_by_key (d_event_time, d_event_lp_number);
 		vex::sort_by_key (d_event_lp_number, d_event_time);
 
+		markKernel[0].config (grid_size, block_size);
+		markKernel[0].push_arg(d_event_lp_number(0));
+		markKernel[0].push_arg(d_next_event_flag_lp(0));
+		markKernel[0].push_arg(d_next_event_flag_time(0));
+		markKernel[0](ctx.queue(0));
+		ctx.queue(0).finish();
+
+		vex::sort_by_key (d_next_event_flag_lp, d_event_lp_number);
+		vex::sort_by_key (d_next_event_flag_time, d_event_time);
+
 		d_remote_flip = random_state (vex::element_index(), random_pass++);
 		d_event_target_lp_number = (num_lps - 1) * random_state (vex::element_index(), random_pass++);
 
-		for(uint d = 0; d < ctx.size(); d++) {
-			simKernel[d].config (grid_run_size, block_size);
-			simKernel[d].push_arg(d_lp_current_time(d));
-			simKernel[d].push_arg(d_event_time(d));
-			simKernel[d].push_arg(d_event_lp_number(d));
-			simKernel[d].push_arg(d_current_lbts(d));
-			simKernel[d].push_arg(d_remote_flip(d));
-			simKernel[d].push_arg(d_event_target_lp_number(d));
-			simKernel[d].push_arg(d_events_processed(d));
-			simKernel[d](ctx.queue(d));
-			ctx.queue(d).finish();
-		}
+		simKernel[0].config (grid_run_size, block_size);
+		simKernel[0].push_arg(d_lp_current_time(0));
+		simKernel[0].push_arg(d_event_time(0));
+		simKernel[0].push_arg(d_event_lp_number(0));
+		simKernel[0].push_arg(d_current_lbts(0));
+		simKernel[0].push_arg(d_remote_flip(0));
+		simKernel[0].push_arg(d_event_target_lp_number(0));
+		simKernel[0].push_arg(d_events_processed(0));
+		simKernel[0](ctx.queue(0));
+		ctx.queue(0).finish();
 	}
 
 	total_duration = cpuSecond() - total_start_time;
