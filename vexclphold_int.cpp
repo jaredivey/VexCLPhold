@@ -225,7 +225,7 @@ int main(int argc, char** argv)
 		times.at(0) = cpuSecond();
 		durs.at(0) += times.at(0) - start_loop;
 
-		std::cout << "Current LBTS: " << current_lbts << std::endl;
+		//std::cout << "Current LBTS: " << current_lbts << std::endl;
 		times.at(1) = cpuSecond();
 		durs.at(1) += times.at(1) - times.at(0);
 
