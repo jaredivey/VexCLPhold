@@ -225,58 +225,54 @@ int main(int argc, char** argv)
 		times.at(0) = cpuSecond();
 		durs.at(0) += times.at(0) - start_loop;
 
-		d_current_lbts = current_lbts;
+		std::cout << "Current LBTS: " << current_lbts << std::endl;
 		times.at(1) = cpuSecond();
 		durs.at(1) += times.at(1) - times.at(0);
 
-		std::cout << "Current LBTS: " << current_lbts << std::endl;
+		d_current_lbts = current_lbts;
 		times.at(2) = cpuSecond();
 		durs.at(2) += times.at(2) - times.at(1);
-
-		d_current_lbts = current_lbts;
-		times.at(3) = cpuSecond();
-		durs.at(3) += times.at(3) - times.at(2);
 
 		if(current_lbts >= stop_time)
 		{
 		  break;
 		}
+		times.at(3) = cpuSecond();
+		durs.at(3) += times.at(3) - times.at(2);
+
+		vex::sort_by_key (d_event_time, d_event_lp_number);
 		times.at(4) = cpuSecond();
 		durs.at(4) += times.at(4) - times.at(3);
 
-		vex::sort_by_key (d_event_time, d_event_lp_number);
+		vex::sort_by_key (d_event_lp_number, d_event_time);
 		times.at(5) = cpuSecond();
 		durs.at(5) += times.at(5) - times.at(4);
 
-		vex::sort_by_key (d_event_lp_number, d_event_time);
+		markKernel[0](ctx.queue(0));
+		ctx.queue(0).finish();
 		times.at(6) = cpuSecond();
 		durs.at(6) += times.at(6) - times.at(5);
 
-		markKernel[0](ctx.queue(0));
-		ctx.queue(0).finish();
+		vex::sort_by_key (d_next_event_flag_lp, d_event_lp_number);
 		times.at(7) = cpuSecond();
 		durs.at(7) += times.at(7) - times.at(6);
 
-		vex::sort_by_key (d_next_event_flag_lp, d_event_lp_number);
+		vex::sort_by_key (d_next_event_flag_time, d_event_time);
 		times.at(8) = cpuSecond();
 		durs.at(8) += times.at(8) - times.at(7);
 
-		vex::sort_by_key (d_next_event_flag_time, d_event_time);
+		d_remote_flip = random_state_float (0, (1337 << 20) + vex::element_index());
 		times.at(9) = cpuSecond();
 		durs.at(9) += times.at(9) - times.at(8);
 
-		d_remote_flip = random_state_float (0, (1337 << 20) + vex::element_index());
+		d_event_target_lp_number = random_state_int (0, (1337 << 20) + vex::element_index()) % num_lps;
 		times.at(10) = cpuSecond();
 		durs.at(10) += times.at(10) - times.at(9);
 
-		d_event_target_lp_number = random_state_int (0, (1337 << 20) + vex::element_index()) % num_lps;
-		times.at(11) = cpuSecond();
-		durs.at(11) += times.at(11) - times.at(10);
-
 		simKernel[0](ctx.queue(0));
 		ctx.queue(0).finish();
-		times.at(12) = cpuSecond();
-		durs.at(12) += times.at(12) - times.at(11);
+		times.at(11) = cpuSecond();
+		durs.at(11) += times.at(11) - times.at(10);
 	}
 
 	total_duration = cpuSecond() - total_start_time;
@@ -284,18 +280,17 @@ int main(int argc, char** argv)
 	std::cout << "Stats: " << std::endl;
 
 	std::cout << "Instruction min:           " << durs.at(0) / timing_loops << std::endl;
-	std::cout << "Instruction lbts:          " << durs.at(1) / timing_loops << std::endl;
-	std::cout << "Instruction cout:          " << durs.at(2) / timing_loops << std::endl;
-	std::cout << "Instruction host to dev:   " << durs.at(3) / timing_loops << std::endl;
-	std::cout << "Instruction break check:   " << durs.at(4) / timing_loops << std::endl;
-	std::cout << "Instruction sort by ev:    " << durs.at(5) / timing_loops << std::endl;
-	std::cout << "Instruction sort by lp:    " << durs.at(6) / timing_loops << std::endl;
-	std::cout << "Instruction mark kernel:   " << durs.at(7) / timing_loops << std::endl;
-	std::cout << "Instruction sort next lp:  " << durs.at(8) / timing_loops << std::endl;
-	std::cout << "Instruction sort next ev:  " << durs.at(9) / timing_loops << std::endl;
-	std::cout << "Instruction rng rmt flip:  " << durs.at(10) / timing_loops << std::endl;
-	std::cout << "Instruction rng target lp: " << durs.at(11) / timing_loops << std::endl;
-	std::cout << "Instruction sim kernel:    " << durs.at(12) / timing_loops << std::endl;
+	std::cout << "Instruction cout:          " << durs.at(1) / timing_loops << std::endl;
+	std::cout << "Instruction host to dev:   " << durs.at(2) / timing_loops << std::endl;
+	std::cout << "Instruction break check:   " << durs.at(3) / timing_loops << std::endl;
+	std::cout << "Instruction sort by ev:    " << durs.at(4) / timing_loops << std::endl;
+	std::cout << "Instruction sort by lp:    " << durs.at(5) / timing_loops << std::endl;
+	std::cout << "Instruction mark kernel:   " << durs.at(6) / timing_loops << std::endl;
+	std::cout << "Instruction sort next lp:  " << durs.at(7) / timing_loops << std::endl;
+	std::cout << "Instruction sort next ev:  " << durs.at(8) / timing_loops << std::endl;
+	std::cout << "Instruction rng rmt flip:  " << durs.at(9) / timing_loops << std::endl;
+	std::cout << "Instruction rng target lp: " << durs.at(10) / timing_loops << std::endl;
+	std::cout << "Instruction sim kernel:    " << durs.at(11) / timing_loops << std::endl;
 
 	unsigned int total_events_processed = sum (d_events_processed);
 
