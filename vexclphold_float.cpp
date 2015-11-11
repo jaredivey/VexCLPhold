@@ -5,6 +5,7 @@
 #include <tuple>
 #include <numeric>
 #include <random>
+#include <algorithm>
 #define VEXCL_USE_CUSPARSE
 #include <vexcl/constants.hpp>
 #include <vexcl/devlist.hpp>
@@ -43,24 +44,24 @@ int main(int argc, char** argv)
     // RNG seed run and generator
 	int random_pass = 0;
 	vex::Random<float> random_state_float;
-	vex::Random<int> random_state_int;
+	vex::Random<unsigned int> random_state_int;
 
 	// "Allocate" memory.
-	vex::vector<int> d_event_lp_number (ctx, num_events);
-	vex::vector<int> d_event_target_lp_number (ctx, num_lps);
+	vex::vector<unsigned int> d_event_lp_number (ctx, num_events);
+	vex::vector<unsigned int> d_event_target_lp_number (ctx, num_lps);
 	d_event_lp_number = (vex::element_index() % num_lps); // 0..num_lps-1
 
 	vex::vector<float> d_event_time (ctx, num_events);
 	vex::vector<float> d_remote_flip (ctx, num_lps);
-	d_event_time = 62 * random_state_float (0, (1337 << 20) + vex::element_index());
+	d_event_time = random_state_float (0, (1337 << 20) + vex::element_index());
 
 	vex::vector<unsigned int> d_events_processed (ctx, num_lps);
 	d_events_processed = 0;
 	vex::vector<float> d_lp_current_time (ctx, num_lps);
 	d_lp_current_time = 0.0;
 
-	vex::vector<short> d_next_event_flag_lp (ctx, num_events);
-	vex::vector<short> d_next_event_flag_time (ctx, num_events);
+	vex::vector<unsigned short> d_next_event_flag_lp (ctx, num_events);
+	vex::vector<unsigned short> d_next_event_flag_time (ctx, num_events);
 
 	vex::vector<float> d_current_lbts (ctx, 1);
 
@@ -81,7 +82,7 @@ int main(int argc, char** argv)
 				kernel void initStops(global float *event_time)
 	{
 		const size_t idx = get_local_id(0) + get_group_id(0) * get_local_size(0);
-		const int num_lps = 1 << 20;
+		const unsigned int num_lps = 1 << 20;
 
 		const float stop_time = 60.0f;
 
@@ -102,9 +103,9 @@ int main(int argc, char** argv)
 
 	markKernel.emplace_back(ctx.queue(0),
 		VEX_STRINGIZE_SOURCE(
-				kernel void markNextEventByLP(global int *event_lp,
-						global short *next_event_flag_lp,
-						global short *next_event_flag_time)
+				kernel void markNextEventByLP(global unsigned int *event_lp,
+						global unsigned short *next_event_flag_lp,
+						global unsigned short *next_event_flag_time)
 	{
 		const size_t idx = get_local_id(0) + get_group_id(0) * get_local_size(0);
 
@@ -131,14 +132,14 @@ int main(int argc, char** argv)
 		VEX_STRINGIZE_SOURCE(
 				kernel void simulatorRun(global float *current_time,
 					global float *event_time,
-					global int *event_lp,
+					global unsigned int *event_lp,
 					global float *current_lbps,
 					global float *remote_flip,
-					global float *target_lp,
-					global int *events_processed)
+					global unsigned int *target_lp,
+					global unsigned int *events_processed)
 	{
 		const size_t idx = get_local_id(0) + get_group_id(0) * get_local_size(0);
-		const int num_lps = 1 << 20;
+		const unsigned int num_lps = 1 << 20;
 
 		//if (*current_lbps == event_time[idx]) printf ("LP: %d\n", idx);
 		const float stop_time = 60.0f;
@@ -149,8 +150,6 @@ int main(int argc, char** argv)
 		if (idx < num_lps)
 		{
 			float safe_time = *current_lbps + look_ahead;
-//			if (idx == num_lps - 1) printf ("LBTS: %f\n", *current_lbps);
-//			if (idx == num_lps - 1) printf ("Current time: %f\n", current_time[idx]);
 
 			// Check the next event
 			float next_event_time = event_time[idx];
@@ -159,7 +158,7 @@ int main(int argc, char** argv)
 			if(next_event_time <= safe_time && next_event_time < stop_time)
 			{
 				float cur_time = current_time[idx];
-				int ev_lp = event_lp[idx];
+				unsigned int ev_lp = event_lp[idx];
 
 				//sanity check
 				if(cur_time > next_event_time || ev_lp != idx)
@@ -204,7 +203,7 @@ int main(int argc, char** argv)
 
 	// Initialize the Reductors.
 	vex::Reductor<float, vex::MIN> min(ctx);
-	vex::Reductor<int, vex::SUM> sum(ctx);
+	vex::Reductor<unsigned int, vex::SUM> sum(ctx);
 
 	init_duration = cpuSecond() - init_start_time;
 	std::cout << "Initialization execution time for " << num_lps << " LPs was " << init_duration << " seconds" << std::endl;
@@ -212,37 +211,91 @@ int main(int argc, char** argv)
 	//running simulation
 	std::cout << "Running simulation..." << std::endl;
 	total_start_time = cpuSecond();
+
+	double timing_loops = 0.0;
+	double start_loop = 0.0;
+	std::vector<double> times (13, 0.0);
+	std::vector<double> durs (13, 0.0);
 	while(true)
 	{
+		++timing_loops;
+		start_loop = cpuSecond();
+
 		current_lbts = min(d_event_time);
+		times.at(0) = cpuSecond();
+		durs.at(0) += times.at(0) - start_loop;
+
 		d_current_lbts = current_lbts;
+		times.at(1) = cpuSecond();
+		durs.at(1) += times.at(1) - times.at(0);
+
 		std::cout << "Current LBTS: " << current_lbts << std::endl;
+		times.at(2) = cpuSecond();
+		durs.at(2) += times.at(2) - times.at(1);
+
+		d_current_lbts = current_lbts;
+		times.at(3) = cpuSecond();
+		durs.at(3) += times.at(3) - times.at(2);
 
 		if(current_lbts >= stop_time)
 		{
 		  break;
 		}
+		times.at(4) = cpuSecond();
+		durs.at(4) += times.at(4) - times.at(3);
 
 		vex::sort_by_key (d_event_time, d_event_lp_number);
+		times.at(5) = cpuSecond();
+		durs.at(5) += times.at(5) - times.at(4);
+
 		vex::sort_by_key (d_event_lp_number, d_event_time);
+		times.at(6) = cpuSecond();
+		durs.at(6) += times.at(6) - times.at(5);
 
 		markKernel[0](ctx.queue(0));
 		ctx.queue(0).finish();
+		times.at(7) = cpuSecond();
+		durs.at(7) += times.at(7) - times.at(6);
 
 		vex::sort_by_key (d_next_event_flag_lp, d_event_lp_number);
+		times.at(8) = cpuSecond();
+		durs.at(8) += times.at(8) - times.at(7);
+
 		vex::sort_by_key (d_next_event_flag_time, d_event_time);
+		times.at(9) = cpuSecond();
+		durs.at(9) += times.at(9) - times.at(8);
 
 		d_remote_flip = random_state_float (0, (1337 << 20) + vex::element_index());
+		times.at(10) = cpuSecond();
+		durs.at(10) += times.at(10) - times.at(9);
+
 		d_event_target_lp_number = random_state_int (0, (1337 << 20) + vex::element_index()) % num_lps;
+		times.at(11) = cpuSecond();
+		durs.at(11) += times.at(11) - times.at(10);
 
 		simKernel[0](ctx.queue(0));
 		ctx.queue(0).finish();
-		//if (current_lbts > 6.0) break;
+		times.at(12) = cpuSecond();
+		durs.at(12) += times.at(12) - times.at(11);
 	}
 
 	total_duration = cpuSecond() - total_start_time;
 
 	std::cout << "Stats: " << std::endl;
+
+	std::cout << "Instruction min:           " << durs.at(0) / timing_loops << std::endl;
+	std::cout << "Instruction lbts:          " << durs.at(1) / timing_loops << std::endl;
+	std::cout << "Instruction cout:          " << durs.at(2) / timing_loops << std::endl;
+	std::cout << "Instruction host to dev:   " << durs.at(3) / timing_loops << std::endl;
+	std::cout << "Instruction break check:   " << durs.at(4) / timing_loops << std::endl;
+	std::cout << "Instruction sort by ev:    " << durs.at(5) / timing_loops << std::endl;
+	std::cout << "Instruction sort by lp:    " << durs.at(6) / timing_loops << std::endl;
+	std::cout << "Instruction mark kernel:   " << durs.at(7) / timing_loops << std::endl;
+	std::cout << "Instruction sort next lp:  " << durs.at(8) / timing_loops << std::endl;
+	std::cout << "Instruction sort next ev:  " << durs.at(9) / timing_loops << std::endl;
+	std::cout << "Instruction rng rmt flip:  " << durs.at(10) / timing_loops << std::endl;
+	std::cout << "Instruction rng target lp: " << durs.at(11) / timing_loops << std::endl;
+	std::cout << "Instruction sim kernel:    " << durs.at(12) / timing_loops << std::endl;
 
 	unsigned int total_events_processed = sum (d_events_processed);
 
