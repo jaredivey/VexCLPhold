@@ -16,7 +16,7 @@
 #include <vexcl/sort.hpp>
 
 //todo:  command line parsing
-const int num_lps = 1 << 16;
+const int num_lps = 1 << 20;
 const int num_events = 2 * num_lps;
 const float stop_time = 60.0f;
 
@@ -42,7 +42,8 @@ int main(int argc, char** argv)
 
     // RNG seed run and generator
 	int random_pass = 0;
-	vex::Random<float> random_state;
+	vex::Random<float> random_state_float;
+	vex::Random<int> random_state_int;
 
 	// "Allocate" memory.
 	vex::vector<int> d_event_lp_number (ctx, num_events);
@@ -51,7 +52,7 @@ int main(int argc, char** argv)
 
 	vex::vector<float> d_event_time (ctx, num_events);
 	vex::vector<float> d_remote_flip (ctx, num_lps);
-	d_event_time = random_state (0, (1337 << 16) + vex::element_index());
+	d_event_time = 62 * random_state_float (0, (1337 << 20) + vex::element_index());
 
 	vex::vector<unsigned int> d_events_processed (ctx, num_lps);
 	d_events_processed = 0;
@@ -80,7 +81,7 @@ int main(int argc, char** argv)
 				kernel void initStops(global float *event_time)
 	{
 		const size_t idx = get_local_id(0) + get_group_id(0) * get_local_size(0);
-		const int num_lps = 1 << 16;
+		const int num_lps = 1 << 20;
 
 		const float stop_time = 60.0f;
 
@@ -137,9 +138,9 @@ int main(int argc, char** argv)
 					global int *events_processed)
 	{
 		const size_t idx = get_local_id(0) + get_group_id(0) * get_local_size(0);
-		const int num_lps = 1 << 16;
+		const int num_lps = 1 << 20;
 
-		if (*current_lbps == event_time[idx]) printf ("LP: %d\n", idx);
+		//if (*current_lbps == event_time[idx]) printf ("LP: %d\n", idx);
 		const float stop_time = 60.0f;
 		const float local_rate = 0.9f;
 		const float delay_time = 0.9f;
@@ -214,7 +215,7 @@ int main(int argc, char** argv)
 	while(true)
 	{
 		current_lbts = min(d_event_time);
-		d_current_lbts = min(d_event_time);
+		d_current_lbts = current_lbts;
 		std::cout << "Current LBTS: " << current_lbts << std::endl;
 
 		if(current_lbts >= stop_time)
@@ -231,12 +232,12 @@ int main(int argc, char** argv)
 		vex::sort_by_key (d_next_event_flag_lp, d_event_lp_number);
 		vex::sort_by_key (d_next_event_flag_time, d_event_time);
 
-		d_remote_flip = random_state (0, (1337 << 16) + vex::element_index());
-		d_event_target_lp_number = (num_lps * random_state (0, (1337 << 16) + vex::element_index())) - 1;
+		d_remote_flip = random_state_float (0, (1337 << 20) + vex::element_index());
+		d_event_target_lp_number = random_state_int (0, (1337 << 20) + vex::element_index()) % num_lps;
 
 		simKernel[0](ctx.queue(0));
 		ctx.queue(0).finish();
-		if (current_lbts > 6.0) break;
+		//if (current_lbts > 6.0) break;
 	}
 
 	total_duration = cpuSecond() - total_start_time;
