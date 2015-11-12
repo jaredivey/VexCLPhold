@@ -112,13 +112,13 @@ int main(int argc, char** argv)
 					unsigned int inTheAir; // number of aircraft landing or waiting to land
 					unsigned int onTheGround; // number of landed aircraft
 					unsigned int runwayFree; // boolean, true if runway is available
-				};
+				} AirportState;
 
 				kernel void initSim(global float *event_time,
-						global AirportState *arpt_states,
-						global unsigned int event_types,
-						global unsigned int init_inTheAir,
-						global unsigned int init_onTheGround)
+						global struct AirportState *arpt_states,
+						global unsigned int *event_types,
+						global unsigned int *init_inTheAir,
+						global unsigned int *init_onTheGround)
 	{
 		const size_t idx = get_local_id(0) + get_group_id(0) * get_local_size(0);
 		const unsigned int num_lps = 1 << 4;
@@ -194,13 +194,13 @@ int main(int argc, char** argv)
 					unsigned int inTheAir; // number of aircraft landing or waiting to land
 					unsigned int onTheGround; // number of landed aircraft
 					unsigned int runwayFree; // boolean, true if runway is available
-				};
+				} AirportState;
 
 				kernel void simulatorRun(global float *current_time,
 					global float *event_time,
 					global unsigned int *event_lp,
 					global unsigned int *event_type,
-					global AirportState *lp_arpt,
+					global struct AirportState *lp_arpt,
 					global float *current_lbps,
 					global float *remote_flip,
 					global unsigned int *target_lp,
@@ -239,7 +239,7 @@ int main(int argc, char** argv)
 				//next_event_time stores current time if we reach here
 				float new_event_time = next_event_time;
 
-				if (event_type[idx] == AirportState::ARRIVAL)
+				if (event_type[idx] == AirportEvents::ARRIVAL)
 				{
 					event_lp[idx] = idx;
 					++lp_arpt[idx].inTheAir;
@@ -250,7 +250,7 @@ int main(int argc, char** argv)
 						new_event_time[idx] += rwy_delay_time;
 					}
 				}
-				else if (event_type[idx] == AirportState::LANDED)
+				else if (event_type[idx] == AirportEvents::LANDED)
 				{
 					event_lp[idx] = idx;
 					--lp_arpt[idx].inTheAir;
@@ -266,7 +266,7 @@ int main(int argc, char** argv)
 						// Need to somehow also schedule LANDED event for same LP
 					}
 				}
-				else if (event_type[idx] == AirportState::DEPARTURE)
+				else if (event_type[idx] == AirportEvents::DEPARTURE)
 				{
 					--lp_arpt[idx].onTheGround;
 					new_event_time[idx] += look_ahead;
