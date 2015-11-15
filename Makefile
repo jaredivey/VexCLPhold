@@ -1,5 +1,8 @@
-vex:
-	g++ -std=c++11 -o vexclphold vexclphold_float.cpp -I. -I./vexcl -I./CL -L/usr/lib/x86_64-linux-gnu/ -lOpenCL -lboost_system
+vex_part:
+	g++ -std=c++11 -o vexclphold vexclphold_part.cpp -I. -I./vexcl -I./CL -L/usr/lib/x86_64-linux-gnu/ -lOpenCL -lboost_system
+	
+vex_red:
+	g++ -std=c++11 -o vexclphold vexclphold_reduce.cpp -I. -I./vexcl -I./CL -L/usr/lib/x86_64-linux-gnu/ -lOpenCL -lboost_system
 	
 airport:
 	g++ -std=c++11 -o vexclarpt vexclarpt.cpp -I. -I./vexcl -I./CL -L/usr/lib/x86_64-linux-gnu/ -lOpenCL -lboost_system

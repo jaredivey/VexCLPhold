@@ -18,22 +18,20 @@
 
 //todo:  command line parsing
 const int num_lps = 1 << 4;
-const int num_events = 4 * num_lps;
-const float stop_time = 20.0f;
+const int num_events = 3 * num_lps;
+const float stop_time = 60.0f;
 
 const int block_size = 128;
 const int grid_size = ((num_events + block_size - 1) / block_size);
 const int grid_run_size = ((num_lps + block_size - 1) / block_size);
 
+const unsigned int MAX_ON_GROUND = 4;
 struct AirportState {
+	AirportState () : inTheAir(0), onTheGround(MAX_ON_GROUND), runwayFree(1) {}
 	unsigned int inTheAir; // number of aircraft landing or waiting to land
 	unsigned int onTheGround; // number of landed aircraft
 	unsigned int runwayFree; // boolean, true if runway is available
 };
-
-// Maximums only for initialization purposes
-const unsigned int MAX_IN_AIR = 4;
-const unsigned int MAX_ON_GROUND = 4;
 
 enum AirportEvents {
 	ARRIVAL,
@@ -65,7 +63,6 @@ int main(int argc, char** argv)
 
 	// "Allocate" memory.
 	vex::vector<unsigned int> d_event_lp_number (ctx, num_events);
-	vex::vector<AirportState> d_event_lp_arpt (ctx, num_lps);
 	vex::vector<unsigned int> d_event_target_lp_number (ctx, num_lps);
 	d_event_lp_number = (vex::element_index() % num_lps); // 0..num_lps-1
 
@@ -73,24 +70,24 @@ int main(int argc, char** argv)
 	d_event_time = random_state_float (0, (1337 << 20) + vex::element_index());
 
 	vex::vector<unsigned int> d_event_type (ctx, num_events);
-	d_event_type = random_state_int (0, (1337 << 20) + vex::element_index()) % (unsigned int)(AirportEvents::EMPTY);
+	d_event_type = (unsigned int)AirportEvents::DEPARTURE;
 
-	vex::vector<unsigned int> d_init_inTheAir (ctx, num_lps);
-	d_init_inTheAir = random_state_int (0, (1337 << 20) + vex::element_index()) % MAX_IN_AIR ;
+	vex::vector<unsigned int> d_inTheAir (ctx, num_lps);
+	d_inTheAir = 0;
 
-	vex::vector<unsigned int> d_init_onTheGround (ctx, num_lps);
-	d_init_onTheGround = random_state_int (0, (1337 << 20) + vex::element_index()) % MAX_ON_GROUND;
+	vex::vector<unsigned int> d_onTheGround (ctx, num_lps);
+	d_onTheGround = MAX_ON_GROUND;
 
-	vex::vector<float> d_remote_flip (ctx, num_lps);
+	vex::vector<unsigned int> d_runwayFree (ctx, num_lps);
+	d_runwayFree = 1;
 
 	vex::vector<unsigned int> d_events_processed (ctx, num_lps);
 	d_events_processed = 0;
+
 	vex::vector<float> d_lp_current_time (ctx, num_lps);
 	d_lp_current_time = 0.0;
 
-	vex::vector<unsigned char> d_next_event_flag_lp (ctx, num_events);
-	vex::vector<unsigned char> d_next_event_flag_time (ctx, num_events);
-	vex::vector<unsigned char> d_next_event_flag_type (ctx, num_events);
+	vex::vector<unsigned char> d_next_event_flag (ctx, num_events);
 
 	vex::vector<float> d_current_lbts (ctx, 1);
 
@@ -108,33 +105,25 @@ int main(int argc, char** argv)
 
 	initKernel.emplace_back(ctx.queue(0),
 		VEX_STRINGIZE_SOURCE(
-				struct AirportState {
-					unsigned int inTheAir; // number of aircraft landing or waiting to land
-					unsigned int onTheGround; // number of landed aircraft
-					unsigned int runwayFree; // boolean, true if runway is available
-				} AirportState;
+				enum AirportEvents {
+					ARRIVAL,
+					LANDED,
+					DEPARTURE,
+					EMPTY,
+				};
 
 				kernel void initSim(global float *event_time,
-						global struct AirportState *arpt_states,
-						global unsigned int *event_types,
-						global unsigned int *init_inTheAir,
-						global unsigned int *init_onTheGround)
+						global unsigned int *event_types)
 	{
 		const size_t idx = get_local_id(0) + get_group_id(0) * get_local_size(0);
 		const unsigned int num_lps = 1 << 4;
 
-		const float stop_time = 20.0f;
+		const float stop_time = 60.0f;
 
-		if (idx < num_lps)
-		{
-			arpt_states[idx].inTheAir = init_inTheAir[idx];
-			arpt_states[idx].runwayFree = (init_inTheAir[idx] == 0);
-			arpt_states[idx].onTheGround = init_onTheGround[idx];
-		}
-		else if (idx >= 3 * num_lps && idx < 4 * num_lps)
+		if (idx >=  num_lps && idx < 3 * num_lps)
 		{
 			event_time[idx] = stop_time;
-			event_types[idx] = -1;
+			event_types[idx] = EMPTY;
 		}
 	}
 	),
@@ -142,10 +131,7 @@ int main(int argc, char** argv)
 	);
 	initKernel[0].config (grid_size, block_size);
 	initKernel[0].push_arg(d_event_time(0));
-	initKernel[0].push_arg(d_event_lp_arpt(0));
 	initKernel[0].push_arg(d_event_type(0));
-	initKernel[0].push_arg(d_init_inTheAir(0));
-	initKernel[0].push_arg(d_init_onTheGround(0));
 
 	// Only need to initialize stop events once.
 	initKernel[0](ctx.queue(0));
@@ -154,23 +140,23 @@ int main(int argc, char** argv)
 	markKernel.emplace_back(ctx.queue(0),
 		VEX_STRINGIZE_SOURCE(
 				kernel void markNextEventByLP(global unsigned int *event_lp,
-						global unsigned char *next_event_flag_lp,
-						global unsigned char *next_event_flag_time,
-						global unsigned char *next_event_flag_type)
+						global unsigned char *next_event_flag)
 	{
 		const size_t idx = get_local_id(0) + get_group_id(0) * get_local_size(0);
+		const unsigned int num_lps = 1 << 4;
+		unsigned char flag;
 
-		if (idx == 0 || event_lp[idx] != event_lp[idx-1])
+		if (idx < 3 * num_lps)
 		{
-			next_event_flag_lp[idx] = 0;
-			next_event_flag_time[idx] = 0;
-			next_event_flag_type[idx] = 0;
-		}
-		else
-		{
-			next_event_flag_lp[idx] = 1;
-			next_event_flag_time[idx] = 1;
-			next_event_flag_type[idx] = 1;
+			if (idx == 0 || event_lp[idx] != event_lp[idx-1])
+			{
+				flag = 0;
+			}
+			else
+			{
+				flag = 1;
+			}
+			next_event_flag[idx] = flag;
 		}
 	}
 	),
@@ -178,9 +164,7 @@ int main(int argc, char** argv)
 	);
 	markKernel[0].config (grid_size, block_size);
 	markKernel[0].push_arg(d_event_lp_number(0));
-	markKernel[0].push_arg(d_next_event_flag_lp(0));
-	markKernel[0].push_arg(d_next_event_flag_time(0));
-	markKernel[0].push_arg(d_next_event_flag_type(0));
+	markKernel[0].push_arg(d_next_event_flag(0));
 
 	simKernel.emplace_back(ctx.queue(0),
 		VEX_STRINGIZE_SOURCE(
@@ -190,29 +174,25 @@ int main(int argc, char** argv)
 					DEPARTURE,
 					EMPTY,
 				};
-				struct AirportState {
-					unsigned int inTheAir; // number of aircraft landing or waiting to land
-					unsigned int onTheGround; // number of landed aircraft
-					unsigned int runwayFree; // boolean, true if runway is available
-				} AirportState;
 
 				kernel void simulatorRun(global float *current_time,
 					global float *event_time,
 					global unsigned int *event_lp,
 					global unsigned int *event_type,
-					global struct AirportState *lp_arpt,
+					global unsigned int *event_lp_inTheAir,
+					global unsigned int *event_lp_onTheGround,
+					global unsigned int *event_lp_runwayFree,
 					global float *current_lbps,
-					global float *remote_flip,
 					global unsigned int *target_lp,
 					global unsigned int *events_processed)
 	{
 		const size_t idx = get_local_id(0) + get_group_id(0) * get_local_size(0);
 		const unsigned int num_lps = 1 << 4;
 
-		const float stop_time = 20.0f;
+		const float stop_time = 60.0f;
 		const float local_rate = 0.0f;
-		const float rwy_delay_time = 0.9f;
-		const float gnd_delay_time = 0.9f;
+		const float rwy_delay_time = 0.5f;
+		const float gnd_delay_time = 1.5f;
 		const float look_ahead = 4.0f;
 
 		if (idx < num_lps)
@@ -221,9 +201,12 @@ int main(int argc, char** argv)
 
 			// Check the next event
 			float next_event_time = event_time[idx];
+			float next_event_type = event_type[idx];
 
 			// Ok to process?
-			if(next_event_time <= safe_time && next_event_time < stop_time)
+			if(next_event_time <= safe_time &&
+					next_event_time < stop_time &&
+					next_event_type != EMPTY)
 			{
 				float cur_time = current_time[idx];
 				unsigned int ev_lp = event_lp[idx];
@@ -231,51 +214,67 @@ int main(int argc, char** argv)
 				//sanity check
 				if(cur_time > next_event_time || ev_lp != idx)
 				{
-					printf ("ERROR\n");
+					printf ("ERROR: %f > %f || %d != %d\n",
+							cur_time, next_event_time, ev_lp, idx);
 				}
 
 				events_processed[idx]++;
 
-				//next_event_time stores current time if we reach here
-				float new_event_time = next_event_time;
+				// Empty this event while processing it
+				float new_event_time = stop_time;
+				unsigned int new_event_type = EMPTY;
 
-				if (event_type[idx] == AirportEvents::ARRIVAL)
+				if (next_event_type == ARRIVAL)
 				{
-					event_lp[idx] = idx;
-					++lp_arpt[idx].inTheAir;
-					if (lp_arpt[idx].runwayFree)
+					++event_lp_inTheAir[idx];
+					if (event_lp_runwayFree[idx])
 					{
-						lp_arpt[idx].runwayFree = 0;
-						event_type[idx] = AirportState::LANDED;
-						new_event_time[idx] += rwy_delay_time;
+						event_lp_runwayFree[idx] = 0;
+						new_event_type = LANDED;
+						new_event_time = next_event_time + rwy_delay_time;
 					}
 				}
-				else if (event_type[idx] == AirportEvents::LANDED)
+				else if (next_event_type == LANDED)
 				{
-					event_lp[idx] = idx;
-					--lp_arpt[idx].inTheAir;
-					++lp_arpt[idx].onTheGround;
-					event_type[idx] = AirportState::DEPARTURE;
-					new_event_time[idx] += gnd_delay_time;
-					if (lp_arpt[idx].inTheAir == 0)
+					if (event_lp_inTheAir[idx] > 0)
 					{
-						lp_arpt[idx].runwayFree = 1;
+						--event_lp_inTheAir[idx];
+						++event_lp_onTheGround[idx];
+						new_event_type = DEPARTURE;
+						new_event_time = next_event_time + gnd_delay_time;
+						if (event_lp_inTheAir[idx] > 0)
+						{
+							event_type[idx+num_lps] = LANDED;
+							event_lp[idx+num_lps] = ev_lp;
+							event_time[idx+num_lps] = next_event_time + rwy_delay_time;
+						}
+						else
+						{
+							event_lp_runwayFree[idx] = 1;
+						}
 					}
 					else
 					{
-						// Need to somehow also schedule LANDED event for same LP
+						event_lp_runwayFree[idx] = 1;
 					}
 				}
-				else if (event_type[idx] == AirportEvents::DEPARTURE)
+				else if (next_event_type == DEPARTURE)
 				{
-					--lp_arpt[idx].onTheGround;
-					new_event_time[idx] += look_ahead;
-					event_lp[idx] = target_lp[idx];
+					if (event_lp_onTheGround[idx] > 0)
+					{
+						--event_lp_onTheGround[idx];
+
+						ev_lp = target_lp[idx];
+						new_event_type = ARRIVAL;
+						new_event_time = next_event_time + look_ahead;
+					}
 				}
 
 				//writes
 
 				current_time[idx] = next_event_time;
+				event_lp[idx] = ev_lp;
+				event_type[idx] = new_event_type;
 				event_time[idx] = new_event_time;
 			}
 		}
@@ -288,9 +287,10 @@ int main(int argc, char** argv)
 	simKernel[0].push_arg(d_event_time(0));
 	simKernel[0].push_arg(d_event_lp_number(0));
 	simKernel[0].push_arg(d_event_type(0));
-	simKernel[0].push_arg(d_event_lp_arpt(0));
+	simKernel[0].push_arg(d_inTheAir(0));
+	simKernel[0].push_arg(d_onTheGround(0));
+	simKernel[0].push_arg(d_runwayFree(0));
 	simKernel[0].push_arg(d_current_lbts(0));
-	simKernel[0].push_arg(d_remote_flip(0));
 	simKernel[0].push_arg(d_event_target_lp_number(0));
 	simKernel[0].push_arg(d_events_processed(0));
 
@@ -310,13 +310,8 @@ int main(int argc, char** argv)
 	std::vector<double> times (13, 0.0);
 	std::vector<double> durs (13, 0.0);
 
-	vex::vector<float> d_event_time_type = d_event_time;
-	vex::vector<unsigned int> d_event_lp_number_type = d_event_lp_number;
 	while(true)
 	{
-		d_event_time_type = d_event_time;
-		d_event_lp_number_type = d_event_lp_number;
-
 		++timing_loops;
 		start_loop = cpuSecond();
 
@@ -324,7 +319,7 @@ int main(int argc, char** argv)
 		times.at(0) = cpuSecond();
 		durs.at(0) += times.at(0) - start_loop;
 
-		std::cout << "Current LBTS: " << current_lbts << std::endl;
+		std::cout << "Now: " << min(d_lp_current_time) /*<< d_lp_current_time*/ << "; Current LBTS: " << current_lbts << std::endl;
 		times.at(1) = cpuSecond();
 		durs.at(1) += times.at(1) - times.at(0);
 
@@ -339,13 +334,15 @@ int main(int argc, char** argv)
 		times.at(3) = cpuSecond();
 		durs.at(3) += times.at(3) - times.at(2);
 
-		vex::sort_by_key (d_event_time, d_event_lp_number);
-		vex::sort_by_key (d_event_time_type, d_event_type);
+		vex::sort_by_key (d_event_time,
+				boost::fusion::vector_tie(d_event_lp_number, d_event_type),
+				vex::less<double>());
 		times.at(4) = cpuSecond();
 		durs.at(4) += times.at(4) - times.at(3);
 
-		vex::sort_by_key (d_event_lp_number, d_event_time);
-		vex::sort_by_key (d_event_lp_number_type, d_event_type);
+		vex::sort_by_key (d_event_lp_number,
+				boost::fusion::vector_tie(d_event_time, d_event_type),
+				vex::less<unsigned int>());
 		times.at(5) = cpuSecond();
 		durs.at(5) += times.at(5) - times.at(4);
 
@@ -354,15 +351,17 @@ int main(int argc, char** argv)
 		times.at(6) = cpuSecond();
 		durs.at(6) += times.at(6) - times.at(5);
 
-		vex::sort_by_key (d_next_event_flag_lp, d_event_lp_number);
+		vex::sort_by_key (d_next_event_flag,
+				boost::fusion::vector_tie(d_event_lp_number, d_event_time, d_event_type),
+				vex::less<unsigned char>());
 		times.at(7) = cpuSecond();
 		durs.at(7) += times.at(7) - times.at(6);
 
-		vex::sort_by_key (d_next_event_flag_time, d_event_time);
+		//vex::sort_by_key (d_next_event_flag_time, d_event_time);
 		times.at(8) = cpuSecond();
 		durs.at(8) += times.at(8) - times.at(7);
 
-		vex::sort_by_key (d_next_event_flag_type, d_event_type);
+		//vex::sort_by_key (d_next_event_flag_type, d_event_type);
 		times.at(9) = cpuSecond();
 		durs.at(9) += times.at(9) - times.at(8);
 
@@ -374,10 +373,14 @@ int main(int argc, char** argv)
 
 		ctx.queue(0).finish();
 
+		//std::cout << d_event_lp_number << d_event_type << d_event_time << d_inTheAir << d_onTheGround << d_runwayFree << std::endl;
+		// if (timing_loops > 4) break;
+
 		simKernel[0](ctx.queue(0));
 		ctx.queue(0).finish();
 		times.at(11) = cpuSecond();
 		durs.at(11) += times.at(11) - times.at(10);
+
 	}
 
 	total_duration = cpuSecond() - total_start_time;
