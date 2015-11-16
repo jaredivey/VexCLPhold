@@ -17,9 +17,9 @@
 #include <vexcl/sort.hpp>
 
 //todo:  command line parsing
-const int num_lps = 1 << 4;
-const int num_events = 3 * num_lps;
-const float stop_time = 60.0f;
+const int num_lps = 1 << 13;
+const int num_events = num_lps * 3;
+const float stop_time = 168.0f;
 
 const int block_size = 128;
 const int grid_size = ((num_events + block_size - 1) / block_size);
@@ -101,6 +101,7 @@ int main(int argc, char** argv)
 	// Compile and store the simulator kernels.
 	std::vector<vex::backend::kernel> initKernel;
 	std::vector<vex::backend::kernel> markKernel;
+	std::vector<vex::backend::kernel> markNextKernel;
 	std::vector<vex::backend::kernel> simKernel;
 
 	initKernel.emplace_back(ctx.queue(0),
@@ -116,11 +117,11 @@ int main(int argc, char** argv)
 						global unsigned int *event_types)
 	{
 		const size_t idx = get_local_id(0) + get_group_id(0) * get_local_size(0);
-		const unsigned int num_lps = 1 << 4;
+		const unsigned int num_lps = 1 << 13;
 
-		const float stop_time = 60.0f;
+		const float stop_time = 168.0f;
 
-		if (idx >=  num_lps && idx < 3 * num_lps)
+		if (idx >=  num_lps && idx < num_lps * 3)
 		{
 			event_time[idx] = stop_time;
 			event_types[idx] = EMPTY;
@@ -143,10 +144,10 @@ int main(int argc, char** argv)
 						global unsigned char *next_event_flag)
 	{
 		const size_t idx = get_local_id(0) + get_group_id(0) * get_local_size(0);
-		const unsigned int num_lps = 1 << 4;
+		const unsigned int num_lps = 1 << 13;
 		unsigned char flag;
 
-		if (idx < 3 * num_lps)
+		if (idx < num_lps * 3)
 		{
 			if (idx == 0 || event_lp[idx] != event_lp[idx-1])
 			{
@@ -165,6 +166,35 @@ int main(int argc, char** argv)
 	markKernel[0].config (grid_size, block_size);
 	markKernel[0].push_arg(d_event_lp_number(0));
 	markKernel[0].push_arg(d_next_event_flag(0));
+
+	markNextKernel.emplace_back(ctx.queue(0),
+		VEX_STRINGIZE_SOURCE(
+				kernel void markNextStopEventByLP(global unsigned int *event_lp,
+						global unsigned char *next_event_flag)
+	{
+		const size_t idx = get_local_id(0) + get_group_id(0) * get_local_size(0);
+		const unsigned int num_lps = 1 << 13;
+		unsigned char flag;
+
+		if (idx >= num_lps)
+		{
+			if (idx == num_lps * 3 - 1 || event_lp[idx+1] != event_lp[idx])
+			{
+				flag = 0;
+			}
+			else
+			{
+				flag = 1;
+			}
+			next_event_flag[idx] = flag;
+		}
+	}
+	),
+	"markNextStopEventByLP"
+	);
+	markNextKernel[0].config (grid_size, block_size);
+	markNextKernel[0].push_arg(d_event_lp_number(0));
+	markNextKernel[0].push_arg(d_next_event_flag(0));
 
 	simKernel.emplace_back(ctx.queue(0),
 		VEX_STRINGIZE_SOURCE(
@@ -187,12 +217,11 @@ int main(int argc, char** argv)
 					global unsigned int *events_processed)
 	{
 		const size_t idx = get_local_id(0) + get_group_id(0) * get_local_size(0);
-		const unsigned int num_lps = 1 << 4;
+		const unsigned int num_lps = 1 << 13;
 
-		const float stop_time = 60.0f;
-		const float local_rate = 0.0f;
-		const float rwy_delay_time = 0.5f;
-		const float gnd_delay_time = 1.5f;
+		const float stop_time = 168.0f;
+		const float rwy_delay_time = 0.25f;
+		const float gnd_delay_time = 1.0f;
 		const float look_ahead = 4.0f;
 
 		if (idx < num_lps)
@@ -319,7 +348,7 @@ int main(int argc, char** argv)
 		times.at(0) = cpuSecond();
 		durs.at(0) += times.at(0) - start_loop;
 
-		std::cout << "Now: " << min(d_lp_current_time) /*<< d_lp_current_time*/ << "; Current LBTS: " << current_lbts << std::endl;
+		//std::cout << "Now: " << min(d_lp_current_time) /*<< d_lp_current_time*/ << "; Current LBTS: " << current_lbts << std::endl;
 		times.at(1) = cpuSecond();
 		durs.at(1) += times.at(1) - times.at(0);
 
@@ -357,22 +386,29 @@ int main(int argc, char** argv)
 		times.at(7) = cpuSecond();
 		durs.at(7) += times.at(7) - times.at(6);
 
-		//vex::sort_by_key (d_next_event_flag_time, d_event_time);
+		// Push an empty event to [num_lps, 2*num_lps) spaces
+		d_next_event_flag = 0;
+		markNextKernel[0](ctx.queue(0));
+		ctx.queue(0).finish();
 		times.at(8) = cpuSecond();
 		durs.at(8) += times.at(8) - times.at(7);
 
-		//vex::sort_by_key (d_next_event_flag_type, d_event_type);
+		vex::sort_by_key (d_next_event_flag,
+				boost::fusion::vector_tie(d_event_lp_number, d_event_time, d_event_type),
+				vex::less<unsigned char>());
 		times.at(9) = cpuSecond();
 		durs.at(9) += times.at(9) - times.at(8);
 
 		ctx.queue(0).finish();
 
+		// Select the random destinations for departures
 		d_event_target_lp_number = random_state_int (0, (1337 << 20) + vex::element_index()) % num_lps;
 		times.at(10) = cpuSecond();
 		durs.at(10) += times.at(10) - times.at(9);
 
 		ctx.queue(0).finish();
 
+		//std::cout << d_event_lp_number << std::endl;
 		//std::cout << d_event_lp_number << d_event_type << d_event_time << d_inTheAir << d_onTheGround << d_runwayFree << std::endl;
 		// if (timing_loops > 4) break;
 
@@ -387,18 +423,18 @@ int main(int argc, char** argv)
 
 	std::cout << "Stats: " << std::endl;
 
-	std::cout << "Instruction min:           " << durs.at(0) / timing_loops << std::endl;
-	std::cout << "Instruction cout:          " << durs.at(1) / timing_loops << std::endl;
-	std::cout << "Instruction host to dev:   " << durs.at(2) / timing_loops << std::endl;
-	std::cout << "Instruction break check:   " << durs.at(3) / timing_loops << std::endl;
-	std::cout << "Instruction sort by ev:    " << durs.at(4) / timing_loops << std::endl;
-	std::cout << "Instruction sort by lp:    " << durs.at(5) / timing_loops << std::endl;
-	std::cout << "Instruction mark kernel:   " << durs.at(6) / timing_loops << std::endl;
-	std::cout << "Instruction sort next lp:  " << durs.at(7) / timing_loops << std::endl;
-	std::cout << "Instruction sort next ev:  " << durs.at(8) / timing_loops << std::endl;
-	std::cout << "Instruction sort next ty:  " << durs.at(9) / timing_loops << std::endl;
-	std::cout << "Instruction rng target lp: " << durs.at(10) / timing_loops << std::endl;
-	std::cout << "Instruction sim kernel:    " << durs.at(11) / timing_loops << std::endl;
+	std::cout << "Instruction min:              " << durs.at(0) / timing_loops << std::endl;
+	std::cout << "Instruction cout:             " << durs.at(1) / timing_loops << std::endl;
+	std::cout << "Instruction host to dev:      " << durs.at(2) / timing_loops << std::endl;
+	std::cout << "Instruction break check:      " << durs.at(3) / timing_loops << std::endl;
+	std::cout << "Instruction sort by ev:       " << durs.at(4) / timing_loops << std::endl;
+	std::cout << "Instruction sort by lp:       " << durs.at(5) / timing_loops << std::endl;
+	std::cout << "Instruction mark kernel:      " << durs.at(6) / timing_loops << std::endl;
+	std::cout << "Instruction sort next lp:     " << durs.at(7) / timing_loops << std::endl;
+	std::cout << "Instruction mark stop kernel: " << durs.at(8) / timing_loops << std::endl;
+	std::cout << "Instruction sort next empty:  " << durs.at(9) / timing_loops << std::endl;
+	std::cout << "Instruction rng target lp:    " << durs.at(10) / timing_loops << std::endl;
+	std::cout << "Instruction sim kernel:       " << durs.at(11) / timing_loops << std::endl;
 
 	unsigned int total_events_processed = sum (d_events_processed);
 

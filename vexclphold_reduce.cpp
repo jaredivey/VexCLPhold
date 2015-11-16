@@ -60,8 +60,7 @@ int main(int argc, char** argv)
 	vex::vector<float> d_lp_current_time (ctx, num_lps);
 	d_lp_current_time = 0.0;
 
-	vex::vector<unsigned char> d_next_event_flag_lp (ctx, num_events);
-	vex::vector<unsigned char> d_next_event_flag_time (ctx, num_events);
+	vex::vector<unsigned char> d_next_event_flag (ctx, num_events);
 
 	vex::vector<float> d_current_lbts (ctx, 1);
 
@@ -105,8 +104,7 @@ int main(int argc, char** argv)
 	markKernel.emplace_back(ctx.queue(0),
 		VEX_STRINGIZE_SOURCE(
 				kernel void markNextEventByLP(global unsigned int *event_lp,
-						global unsigned char *next_event_flag_lp,
-						global unsigned char *next_event_flag_time)
+						global unsigned char *next_event_flag)
 	{
 		const size_t idx = get_local_id(0) + get_group_id(0) * get_local_size(0);
 		unsigned char flag;
@@ -120,23 +118,20 @@ int main(int argc, char** argv)
 			flag = 1;
 		}
 
-		next_event_flag_lp[idx] = flag;
-		next_event_flag_time[idx] = flag;
+		next_event_flag[idx] = flag;
 	}
 	),
 	"markNextEventByLP"
 	);
 	markKernel[0].config (grid_size, block_size);
 	markKernel[0].push_arg(d_event_lp_number(0));
-	markKernel[0].push_arg(d_next_event_flag_lp(0));
-	markKernel[0].push_arg(d_next_event_flag_time(0));
+	markKernel[0].push_arg(d_next_event_flag(0));
 
 	markWndKernel.emplace_back(ctx.queue(0),
 		VEX_STRINGIZE_SOURCE(
 				kernel void markEventsInWindow(global float *current_lbts,
 						global float* event_time,
-						global unsigned char *next_event_flag_lp,
-						global unsigned char *next_event_flag_time)
+						global unsigned char *next_event_flag)
 	{
 		const size_t idx = get_local_id(0) + get_group_id(0) * get_local_size(0);
 		const float next_event_time = event_time[idx];
@@ -150,8 +145,7 @@ int main(int argc, char** argv)
 		else
 		    flag = 1;
 
-		next_event_flag_lp[idx] = flag;
-		next_event_flag_time[idx] = flag;
+		next_event_flag[idx] = flag;
 	}
 	),
 	"markEventsInWindow"
@@ -159,8 +153,7 @@ int main(int argc, char** argv)
 	markWndKernel[0].config (grid_size, block_size);
 	markWndKernel[0].push_arg(d_current_lbts(0));
 	markWndKernel[0].push_arg(d_event_time(0));
-	markWndKernel[0].push_arg(d_next_event_flag_lp(0));
-	markWndKernel[0].push_arg(d_next_event_flag_time(0));
+	markWndKernel[0].push_arg(d_next_event_flag(0));
 
 	simKernel.emplace_back(ctx.queue(0),
 		VEX_STRINGIZE_SOURCE(
@@ -258,7 +251,7 @@ int main(int argc, char** argv)
 //		times.at(0) = cpuSecond();
 //		durs.at(0) += times.at(0) - start_loop;
 
-		std::cout << "Current LBTS: " << current_lbts << std::endl;
+//		std::cout << "Current LBTS: " << current_lbts << std::endl;
 //		times.at(1) = cpuSecond();
 //		durs.at(1) += times.at(1) - times.at(0);
 
@@ -276,8 +269,9 @@ int main(int argc, char** argv)
 		markWndKernel[0](ctx.queue(0));
 		ctx.queue(0).finish();
 
-		vex::sort_by_key (d_next_event_flag_lp, d_event_lp_number);
-		vex::sort_by_key (d_next_event_flag_time, d_event_time);
+		vex::sort_by_key (d_next_event_flag,
+				boost::fusion::vector_tie(d_event_lp_number, d_event_time),
+				vex::less<unsigned char>());
 
 		vex::sort_by_key (d_event_time, d_event_lp_number);
 //		times.at(4) = cpuSecond();
@@ -287,19 +281,16 @@ int main(int argc, char** argv)
 //		times.at(5) = cpuSecond();
 //		durs.at(5) += times.at(5) - times.at(4);
 
-		d_next_event_flag_lp = 0;
-		d_next_event_flag_time = 0;
+		d_next_event_flag = 0;
 
 		markKernel[0](ctx.queue(0));
 		ctx.queue(0).finish();
 //		times.at(6) = cpuSecond();
 //		durs.at(6) += times.at(6) - times.at(5);
 
-		vex::sort_by_key (d_next_event_flag_lp, d_event_lp_number);
-//		times.at(7) = cpuSecond();
-//		durs.at(7) += times.at(7) - times.at(6);
-
-		vex::sort_by_key (d_next_event_flag_time, d_event_time);
+		vex::sort_by_key (d_next_event_flag,
+				boost::fusion::vector_tie(d_event_lp_number, d_event_time),
+				vex::less<unsigned char>());
 //		times.at(8) = cpuSecond();
 //		durs.at(8) += times.at(8) - times.at(7);
 
