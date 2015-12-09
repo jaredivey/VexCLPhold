@@ -37,7 +37,7 @@ int main(int argc, char** argv)
 	double init_start_time = cpuSecond();
 
 	// Get the device context.
-	vex::Context ctx( vex::Filter::Type(CL_DEVICE_TYPE_GPU) && vex::Filter::DoublePrecision );
+	vex::Context ctx( vex::Filter::Count(1) && vex::Filter::Type(CL_DEVICE_TYPE_GPU) && vex::Filter::DoublePrecision );
 	if (!ctx) throw std::runtime_error("No devices available.");
     std::cout << ctx << std::endl;
 

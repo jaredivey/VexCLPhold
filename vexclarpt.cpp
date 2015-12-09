@@ -17,8 +17,9 @@
 #include <vexcl/sort.hpp>
 
 //todo:  command line parsing
-const int num_lps = 1 << 13;
-const int num_events = num_lps * 3;
+const int num_lps = 1 << 16;
+const int num_planes_per_arpt = 1;
+const int num_events = num_lps * (num_planes_per_arpt + 1);
 const float stop_time = 168.0f;
 
 const int block_size = 128;
@@ -27,10 +28,9 @@ const int grid_run_size = ((num_lps + block_size - 1) / block_size);
 
 const unsigned int MAX_ON_GROUND = 4;
 struct AirportState {
-	AirportState () : inTheAir(0), onTheGround(MAX_ON_GROUND), runwayFree(1) {}
+	AirportState () : inTheAir(0), onTheGround(num_planes_per_arpt) {}
 	unsigned int inTheAir; // number of aircraft landing or waiting to land
 	unsigned int onTheGround; // number of landed aircraft
-	unsigned int runwayFree; // boolean, true if runway is available
 };
 
 enum AirportEvents {
@@ -52,7 +52,7 @@ int main(int argc, char** argv)
 	double init_start_time = cpuSecond();
 
 	// Get the device context.
-	vex::Context ctx( vex::Filter::Type(CL_DEVICE_TYPE_GPU) && vex::Filter::DoublePrecision );
+	vex::Context ctx( vex::Filter::Count(1) && vex::Filter::Type(CL_DEVICE_TYPE_GPU) && vex::Filter::DoublePrecision );
 	if (!ctx) throw std::runtime_error("No devices available.");
     std::cout << ctx << std::endl;
 
@@ -76,10 +76,10 @@ int main(int argc, char** argv)
 	d_inTheAir = 0;
 
 	vex::vector<unsigned int> d_onTheGround (ctx, num_lps);
-	d_onTheGround = MAX_ON_GROUND;
+	d_onTheGround = num_planes_per_arpt;
 
-	vex::vector<unsigned int> d_runwayFree (ctx, num_lps);
-	d_runwayFree = 1;
+	vex::vector<unsigned int> d_numLandings (ctx, num_lps);
+	d_numLandings = 0;
 
 	vex::vector<unsigned int> d_events_processed (ctx, num_lps);
 	d_events_processed = 0;
@@ -117,11 +117,11 @@ int main(int argc, char** argv)
 						global unsigned int *event_types)
 	{
 		const size_t idx = get_local_id(0) + get_group_id(0) * get_local_size(0);
-		const unsigned int num_lps = 1 << 13;
+		const unsigned int num_lps = 1 << 16;
 
 		const float stop_time = 168.0f;
 
-		if (idx >=  num_lps && idx < num_lps * 3)
+		if (idx >=  num_lps && idx < num_lps * 2)
 		{
 			event_time[idx] = stop_time;
 			event_types[idx] = EMPTY;
@@ -144,10 +144,10 @@ int main(int argc, char** argv)
 						global unsigned char *next_event_flag)
 	{
 		const size_t idx = get_local_id(0) + get_group_id(0) * get_local_size(0);
-		const unsigned int num_lps = 1 << 13;
+		const unsigned int num_lps = 1 << 16;
 		unsigned char flag;
 
-		if (idx < num_lps * 3)
+		if (idx < num_lps * 2)
 		{
 			if (idx == 0 || event_lp[idx] != event_lp[idx-1])
 			{
@@ -167,35 +167,6 @@ int main(int argc, char** argv)
 	markKernel[0].push_arg(d_event_lp_number(0));
 	markKernel[0].push_arg(d_next_event_flag(0));
 
-	markNextKernel.emplace_back(ctx.queue(0),
-		VEX_STRINGIZE_SOURCE(
-				kernel void markNextStopEventByLP(global unsigned int *event_lp,
-						global unsigned char *next_event_flag)
-	{
-		const size_t idx = get_local_id(0) + get_group_id(0) * get_local_size(0);
-		const unsigned int num_lps = 1 << 13;
-		unsigned char flag;
-
-		if (idx >= num_lps)
-		{
-			if (idx == num_lps * 3 - 1 || event_lp[idx+1] != event_lp[idx])
-			{
-				flag = 0;
-			}
-			else
-			{
-				flag = 1;
-			}
-			next_event_flag[idx] = flag;
-		}
-	}
-	),
-	"markNextStopEventByLP"
-	);
-	markNextKernel[0].config (grid_size, block_size);
-	markNextKernel[0].push_arg(d_event_lp_number(0));
-	markNextKernel[0].push_arg(d_next_event_flag(0));
-
 	simKernel.emplace_back(ctx.queue(0),
 		VEX_STRINGIZE_SOURCE(
 				enum AirportEvents {
@@ -211,13 +182,13 @@ int main(int argc, char** argv)
 					global unsigned int *event_type,
 					global unsigned int *event_lp_inTheAir,
 					global unsigned int *event_lp_onTheGround,
-					global unsigned int *event_lp_runwayFree,
+					global unsigned int *event_lp_numLandings,
 					global float *current_lbps,
 					global unsigned int *target_lp,
 					global unsigned int *events_processed)
 	{
 		const size_t idx = get_local_id(0) + get_group_id(0) * get_local_size(0);
-		const unsigned int num_lps = 1 << 13;
+		const unsigned int num_lps = 1 << 16;
 
 		const float stop_time = 168.0f;
 		const float rwy_delay_time = 0.25f;
@@ -256,47 +227,23 @@ int main(int argc, char** argv)
 				if (next_event_type == ARRIVAL)
 				{
 					++event_lp_inTheAir[idx];
-					if (event_lp_runwayFree[idx])
-					{
-						event_lp_runwayFree[idx] = 0;
-						new_event_type = LANDED;
-						new_event_time = next_event_time + rwy_delay_time;
-					}
+					new_event_type = LANDED;
+					new_event_time = next_event_time + rwy_delay_time;
 				}
 				else if (next_event_type == LANDED)
 				{
-					if (event_lp_inTheAir[idx] > 0)
-					{
-						--event_lp_inTheAir[idx];
-						++event_lp_onTheGround[idx];
-						new_event_type = DEPARTURE;
-						new_event_time = next_event_time + gnd_delay_time;
-						if (event_lp_inTheAir[idx] > 0)
-						{
-							event_type[idx+num_lps] = LANDED;
-							event_lp[idx+num_lps] = ev_lp;
-							event_time[idx+num_lps] = next_event_time + rwy_delay_time;
-						}
-						else
-						{
-							event_lp_runwayFree[idx] = 1;
-						}
-					}
-					else
-					{
-						event_lp_runwayFree[idx] = 1;
-					}
+					++event_lp_numLandings[idx];
+					--event_lp_inTheAir[idx];
+					++event_lp_onTheGround[idx];
+					new_event_type = DEPARTURE;
+					new_event_time = next_event_time + gnd_delay_time;
 				}
 				else if (next_event_type == DEPARTURE)
 				{
-					if (event_lp_onTheGround[idx] > 0)
-					{
-						--event_lp_onTheGround[idx];
-
-						ev_lp = target_lp[idx];
-						new_event_type = ARRIVAL;
-						new_event_time = next_event_time + look_ahead;
-					}
+					--event_lp_onTheGround[idx];
+					ev_lp = target_lp[idx];
+					new_event_type = ARRIVAL;
+					new_event_time = next_event_time + look_ahead;
 				}
 
 				//writes
@@ -318,7 +265,7 @@ int main(int argc, char** argv)
 	simKernel[0].push_arg(d_event_type(0));
 	simKernel[0].push_arg(d_inTheAir(0));
 	simKernel[0].push_arg(d_onTheGround(0));
-	simKernel[0].push_arg(d_runwayFree(0));
+	simKernel[0].push_arg(d_numLandings(0));
 	simKernel[0].push_arg(d_current_lbts(0));
 	simKernel[0].push_arg(d_event_target_lp_number(0));
 	simKernel[0].push_arg(d_events_processed(0));
@@ -334,111 +281,55 @@ int main(int argc, char** argv)
 	std::cout << "Running simulation..." << std::endl;
 	total_start_time = cpuSecond();
 
-	double timing_loops = 0.0;
-	double start_loop = 0.0;
-	std::vector<double> times (13, 0.0);
-	std::vector<double> durs (13, 0.0);
-
 	while(true)
 	{
-		++timing_loops;
-		start_loop = cpuSecond();
-
 		current_lbts = min(d_event_time);
-		times.at(0) = cpuSecond();
-		durs.at(0) += times.at(0) - start_loop;
 
 		//std::cout << "Now: " << min(d_lp_current_time) /*<< d_lp_current_time*/ << "; Current LBTS: " << current_lbts << std::endl;
-		times.at(1) = cpuSecond();
-		durs.at(1) += times.at(1) - times.at(0);
 
 		d_current_lbts = current_lbts;
-		times.at(2) = cpuSecond();
-		durs.at(2) += times.at(2) - times.at(1);
 
 		if(current_lbts >= stop_time)
 		{
 		  break;
 		}
-		times.at(3) = cpuSecond();
-		durs.at(3) += times.at(3) - times.at(2);
 
 		vex::sort_by_key (d_event_time,
 				boost::fusion::vector_tie(d_event_lp_number, d_event_type),
 				vex::less<double>());
-		times.at(4) = cpuSecond();
-		durs.at(4) += times.at(4) - times.at(3);
 
 		vex::sort_by_key (d_event_lp_number,
 				boost::fusion::vector_tie(d_event_time, d_event_type),
 				vex::less<unsigned int>());
-		times.at(5) = cpuSecond();
-		durs.at(5) += times.at(5) - times.at(4);
 
 		markKernel[0](ctx.queue(0));
 		ctx.queue(0).finish();
-		times.at(6) = cpuSecond();
-		durs.at(6) += times.at(6) - times.at(5);
 
 		vex::sort_by_key (d_next_event_flag,
 				boost::fusion::vector_tie(d_event_lp_number, d_event_time, d_event_type),
 				vex::less<unsigned char>());
-		times.at(7) = cpuSecond();
-		durs.at(7) += times.at(7) - times.at(6);
-
-		// Push an empty event to [num_lps, 2*num_lps) spaces
-		d_next_event_flag = 0;
-		markNextKernel[0](ctx.queue(0));
-		ctx.queue(0).finish();
-		times.at(8) = cpuSecond();
-		durs.at(8) += times.at(8) - times.at(7);
-
-		vex::sort_by_key (d_next_event_flag,
-				boost::fusion::vector_tie(d_event_lp_number, d_event_time, d_event_type),
-				vex::less<unsigned char>());
-		times.at(9) = cpuSecond();
-		durs.at(9) += times.at(9) - times.at(8);
-
-		ctx.queue(0).finish();
 
 		// Select the random destinations for departures
 		d_event_target_lp_number = random_state_int (0, (1337 << 20) + vex::element_index()) % num_lps;
-		times.at(10) = cpuSecond();
-		durs.at(10) += times.at(10) - times.at(9);
 
 		ctx.queue(0).finish();
 
 		//std::cout << d_event_lp_number << std::endl;
-		//std::cout << d_event_lp_number << d_event_type << d_event_time << d_inTheAir << d_onTheGround << d_runwayFree << std::endl;
-		// if (timing_loops > 4) break;
+		//std::cout << d_event_lp_number << d_event_type << d_event_time << d_inTheAir << d_onTheGround << std::endl;
 
 		simKernel[0](ctx.queue(0));
 		ctx.queue(0).finish();
-		times.at(11) = cpuSecond();
-		durs.at(11) += times.at(11) - times.at(10);
-
 	}
 
 	total_duration = cpuSecond() - total_start_time;
 
 	std::cout << "Stats: " << std::endl;
 
-	std::cout << "Instruction min:              " << durs.at(0) / timing_loops << std::endl;
-	std::cout << "Instruction cout:             " << durs.at(1) / timing_loops << std::endl;
-	std::cout << "Instruction host to dev:      " << durs.at(2) / timing_loops << std::endl;
-	std::cout << "Instruction break check:      " << durs.at(3) / timing_loops << std::endl;
-	std::cout << "Instruction sort by ev:       " << durs.at(4) / timing_loops << std::endl;
-	std::cout << "Instruction sort by lp:       " << durs.at(5) / timing_loops << std::endl;
-	std::cout << "Instruction mark kernel:      " << durs.at(6) / timing_loops << std::endl;
-	std::cout << "Instruction sort next lp:     " << durs.at(7) / timing_loops << std::endl;
-	std::cout << "Instruction mark stop kernel: " << durs.at(8) / timing_loops << std::endl;
-	std::cout << "Instruction sort next empty:  " << durs.at(9) / timing_loops << std::endl;
-	std::cout << "Instruction rng target lp:    " << durs.at(10) / timing_loops << std::endl;
-	std::cout << "Instruction sim kernel:       " << durs.at(11) / timing_loops << std::endl;
-
 	unsigned int total_events_processed = sum (d_events_processed);
+	unsigned int total_num_landings = sum (d_numLandings);
 
 	std::cout << "Total Number of Events Processed: " << total_events_processed << std::endl;
+	std::cout << "Total Number of Planes Landed: " << total_num_landings << std::endl;
 
 	std::cout << "Simulation Run Time: " << total_duration << " seconds." << std::endl;
 
